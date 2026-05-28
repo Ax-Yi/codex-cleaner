@@ -30,10 +30,13 @@ class CleanerApp(tk.Tk):
         self.tree_items: dict[str, ScanItem] = {}
 
         self.path_var = tk.StringVar(value=str(self.scan_root))
+        self.result_filter_var = tk.StringVar(value="")
         self.large_var = tk.BooleanVar(value=True)
         self.duplicate_var = tk.BooleanVar(value=True)
         self.python_cache_var = tk.BooleanVar(value=True)
         self.privacy_var = tk.BooleanVar(value=True)
+        self.search_var = tk.BooleanVar(value=False)
+        self.search_query_var = tk.StringVar(value="")
         self.min_size_var = tk.IntVar(value=100)
         self.status_var = tk.StringVar(value="请选择目录后开始扫描。默认只扫描，不删除。")
 
@@ -59,6 +62,13 @@ class CleanerApp(tk.Tk):
         ttk.Checkbutton(options, text="Python 项目缓存", variable=self.python_cache_var).pack(side=tk.LEFT, padx=(18, 0))
         ttk.Checkbutton(options, text="隐私文件", variable=self.privacy_var).pack(side=tk.LEFT, padx=(18, 0))
 
+        search_frame = ttk.Frame(root)
+        search_frame.pack(fill=tk.X, pady=(0, 8))
+        ttk.Checkbutton(search_frame, text="文件搜索", variable=self.search_var).pack(side=tk.LEFT)
+        ttk.Label(search_frame, text="关键词").pack(side=tk.LEFT, padx=(18, 4))
+        ttk.Entry(search_frame, textvariable=self.search_query_var, width=36).pack(side=tk.LEFT)
+        ttk.Label(search_frame, text="支持普通关键词，也支持 * 和 ? 通配符").pack(side=tk.LEFT, padx=(8, 0))
+
         actions = ttk.Frame(root)
         actions.pack(fill=tk.X, pady=(0, 8))
         self.scan_button = ttk.Button(actions, text="开始扫描", command=self.start_scan)
@@ -79,6 +89,13 @@ class CleanerApp(tk.Tk):
         report_frame = ttk.Frame(notebook, padding=6)
         notebook.add(result_frame, text="扫描结果")
         notebook.add(report_frame, text="清理报告")
+
+        filter_frame = ttk.Frame(result_frame)
+        filter_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        ttk.Label(filter_frame, text="结果内搜索").pack(side=tk.LEFT)
+        ttk.Entry(filter_frame, textvariable=self.result_filter_var, width=42).pack(side=tk.LEFT, padx=(8, 8))
+        ttk.Button(filter_frame, text="清空", command=self.clear_result_filter).pack(side=tk.LEFT)
+        ttk.Label(filter_frame, text="按分类、原因或路径过滤当前扫描结果").pack(side=tk.LEFT, padx=(8, 0))
 
         columns = ("category", "type", "size", "reason", "group", "path")
         self.tree = ttk.Treeview(result_frame, columns=columns, show="headings", selectmode="extended")
@@ -105,11 +122,12 @@ class CleanerApp(tk.Tk):
         y_scroll = ttk.Scrollbar(result_frame, orient=tk.VERTICAL, command=self.tree.yview)
         x_scroll = ttk.Scrollbar(result_frame, orient=tk.HORIZONTAL, command=self.tree.xview)
         self.tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        y_scroll.grid(row=0, column=1, sticky="ns")
-        x_scroll.grid(row=1, column=0, sticky="ew")
-        result_frame.rowconfigure(0, weight=1)
+        self.tree.grid(row=1, column=0, sticky="nsew")
+        y_scroll.grid(row=1, column=1, sticky="ns")
+        x_scroll.grid(row=2, column=0, sticky="ew")
+        result_frame.rowconfigure(1, weight=1)
         result_frame.columnconfigure(0, weight=1)
+        self.result_filter_var.trace_add("write", self.on_result_filter_changed)
 
         self.report = tk.Text(report_frame, wrap=tk.WORD, height=12)
         report_scroll = ttk.Scrollbar(report_frame, orient=tk.VERTICAL, command=self.report.yview)
@@ -131,9 +149,14 @@ class CleanerApp(tk.Tk):
             "duplicate": self.duplicate_var.get(),
             "python_cache": self.python_cache_var.get(),
             "privacy": self.privacy_var.get(),
+            "search": self.search_var.get(),
         }
         if not any(options.values()):
             messagebox.showwarning("未选择扫描项", "请至少选择一个扫描项。")
+            return
+        search_query = self.search_query_var.get().strip()
+        if options["search"] and not search_query:
+            messagebox.showwarning("缺少搜索关键词", "请先输入要搜索的文件名关键词。")
             return
 
         try:
@@ -154,13 +177,13 @@ class CleanerApp(tk.Tk):
 
         worker = threading.Thread(
             target=self.scan_worker,
-            args=(root, options, self.min_size_var.get()),
+            args=(root, options, self.min_size_var.get(), search_query),
             daemon=True,
         )
         worker.start()
         self.after(100, self.process_worker_queue)
 
-    def scan_worker(self, root: Path, options: dict[str, bool], min_size_mb: int) -> None:
+    def scan_worker(self, root: Path, options: dict[str, bool], min_size_mb: int, search_query: str) -> None:
         started = time.time()
         scanner = CleanerScanner(progress=lambda message: self.worker_queue.put(("status", message)))
         found: list[ScanItem] = []
@@ -177,6 +200,9 @@ class CleanerApp(tk.Tk):
             if options["privacy"]:
                 self.worker_queue.put(("status", "正在扫描隐私文件名特征..."))
                 found.extend(scanner.scan_privacy_files(root))
+            if options["search"]:
+                self.worker_queue.put(("status", f"正在搜索文件：{search_query}"))
+                found.extend(scanner.scan_file_search(root, search_query))
 
             report = build_report(found, root, time.time() - started)
             self.worker_queue.put(("done", (found, report)))
@@ -214,7 +240,10 @@ class CleanerApp(tk.Tk):
     def refresh_results(self) -> None:
         self.tree.delete(*self.tree.get_children())
         self.tree_items.clear()
+        filter_text = self.result_filter_var.get().strip().lower()
         for index, item in enumerate(self.items):
+            if filter_text and not self.item_matches_filter(item, filter_text):
+                continue
             iid = str(index)
             self.tree_items[iid] = item
             self.tree.insert(
@@ -230,6 +259,28 @@ class CleanerApp(tk.Tk):
                     str(item.path),
                 ),
             )
+
+    def item_matches_filter(self, item: ScanItem, filter_text: str) -> bool:
+        searchable = " ".join(
+            [
+                item.category,
+                item.item_type,
+                item.display_size,
+                item.reason,
+                item.duplicate_group,
+                item.checksum,
+                str(item.path),
+                item.path.name,
+            ]
+        ).lower()
+        return filter_text in searchable
+
+    def clear_result_filter(self) -> None:
+        self.result_filter_var.set("")
+
+    def on_result_filter_changed(self, *_args: object) -> None:
+        if hasattr(self, "tree"):
+            self.refresh_results()
 
     def set_report(self, content: str) -> None:
         self.report.configure(state=tk.NORMAL)
@@ -334,6 +385,7 @@ def build_report(items: list[ScanItem], root: Path, elapsed: float, after_delete
             f"- 重复文件：{counts.get('重复文件', 0)}",
             f"- Python 缓存：{counts.get('Python 缓存', 0)}",
             f"- 隐私文件：{counts.get('隐私文件', 0)}",
+            f"- 文件搜索：{counts.get('文件搜索', 0)}",
             f"- 重复文件组：{duplicate_groups}",
             "",
             "安全说明：",

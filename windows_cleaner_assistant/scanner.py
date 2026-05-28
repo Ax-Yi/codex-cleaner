@@ -186,6 +186,42 @@ class CleanerScanner:
                 )
         return sorted(results, key=lambda item: os.fspath(item.path).lower())
 
+    def scan_file_search(self, root: Path, query: str) -> list[ScanItem]:
+        query = query.strip()
+        if not query:
+            return []
+
+        query_lower = query.lower()
+        use_wildcard = "*" in query or "?" in query
+        results: list[ScanItem] = []
+
+        for path in self.iter_files(root):
+            filename = path.name
+            filename_lower = filename.lower()
+            if use_wildcard:
+                matched = fnmatch.fnmatchcase(filename_lower, query_lower)
+            else:
+                matched = query_lower in filename_lower
+
+            if not matched:
+                continue
+
+            try:
+                size = path.stat().st_size
+            except (OSError, PermissionError):
+                size = 0
+            results.append(
+                ScanItem(
+                    category="文件搜索",
+                    path=path,
+                    item_type="文件",
+                    size_bytes=size,
+                    reason=f"文件名匹配搜索关键词：{query}",
+                )
+            )
+
+        return sorted(results, key=lambda item: os.fspath(item.path).lower())
+
     def scan_duplicate_files(self, root: Path) -> list[ScanItem]:
         size_groups: dict[int, list[Path]] = defaultdict(list)
         for path in self.iter_files(root):
