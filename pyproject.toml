@@ -1,0 +1,9 @@
+[project]
+name = "windows-cleaner-assistant"
+version = "0.1.0"
+description = "A beginner-friendly Windows local cleaner assistant."
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.ruff]
+line-length = 120
