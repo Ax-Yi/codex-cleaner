@@ -16,6 +16,24 @@ htmlcov/
 .coverage
 *.xlsx
 tmp*/
+
+# PyInstaller output
+dist/
+build/
+*.spec
+
+# IDE files
+.idea/
+.vscode/
+
+# Generated reports and logs
+*_report.txt
+*_report.xlsx
+delete_log.txt
+
+# Temporary files
+temp*/
+*.tmp
 # Python cache
 __pycache__/
 *.py[cod]

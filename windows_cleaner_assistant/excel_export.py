@@ -39,6 +39,8 @@ def report_rows(items: list[ScanItem], scan_root: Path, report_text: str) -> lis
         ["分类", "数量"],
     ]
     rows.extend([[category, count] for category, count in sorted(counts.items())])
+    rows.extend([[], ["风险等级", "数量"]])
+    rows.extend([[risk, count] for risk, count in sorted(Counter(item.risk_level for item in items).items())])
     rows.extend([[], ["报告摘要", ""]])
     rows.extend([[line, ""] for line in report_text.splitlines()])
     return rows
@@ -46,13 +48,15 @@ def report_rows(items: list[ScanItem], scan_root: Path, report_text: str) -> lis
 
 def result_rows(items: list[ScanItem]) -> list[list[object]]:
     rows: list[list[object]] = [
-        ["分类", "类型", "大小", "大小（字节）", "原因", "重复组", "SHA-256", "路径"]
+        ["分类", "类型", "风险等级", "处理建议", "大小", "大小（字节）", "原因", "重复组", "SHA-256", "路径"]
     ]
     for item in items:
         rows.append(
             [
                 item.category,
                 item.item_type,
+                item.risk_level,
+                item.suggestion,
                 item.display_size,
                 item.size_bytes,
                 item.reason,

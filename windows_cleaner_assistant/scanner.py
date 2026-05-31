@@ -3,6 +3,7 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import os
+import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Callable, Iterable
@@ -55,18 +56,42 @@ PRIVACY_PATTERNS = (
 
 
 class CleanerScanner:
-    def __init__(self, progress: ProgressCallback | None = None) -> None:
+    def __init__(
+        self,
+        progress: ProgressCallback | None = None,
+        pause_event: object | None = None,
+        stop_event: object | None = None,
+        result_callback: Callable[[ScanItem], None] | None = None,
+    ) -> None:
         self.progress = progress or (lambda _message: None)
+        self.pause_event = pause_event
+        self.stop_event = stop_event
+        self.result_callback = result_callback or (lambda _item: None)
+
+    def checkpoint(self) -> bool:
+        while self.pause_event is not None and self.pause_event.is_set():
+            if self.stop_event is not None and self.stop_event.is_set():
+                return False
+            time.sleep(0.1)
+        return not (self.stop_event is not None and self.stop_event.is_set())
+
+    def add_result(self, results: list[ScanItem], item: ScanItem) -> None:
+        results.append(item)
+        self.result_callback(item)
 
     def iter_files(self, root: Path) -> Iterable[Path]:
         root = validate_scan_root(root)
         stack = [root]
         while stack:
+            if not self.checkpoint():
+                return
             current = stack.pop()
             self.progress(f"正在扫描：{current}")
             try:
                 with os.scandir(current) as entries:
                     for entry in entries:
+                        if not self.checkpoint():
+                            return
                         path = Path(entry.path)
                         try:
                             if entry.is_symlink() or is_protected_path(path):
@@ -84,10 +109,14 @@ class CleanerScanner:
         root = validate_scan_root(root)
         stack = [root]
         while stack:
+            if not self.checkpoint():
+                return
             current = stack.pop()
             try:
                 with os.scandir(current) as entries:
                     for entry in entries:
+                        if not self.checkpoint():
+                            return
                         path = Path(entry.path)
                         try:
                             if entry.is_symlink() or is_protected_path(path):
@@ -109,7 +138,8 @@ class CleanerScanner:
             except (OSError, PermissionError):
                 continue
             if size >= min_size:
-                results.append(
+                self.add_result(
+                    results,
                     ScanItem(
                         category="大文件",
                         path=path,
@@ -126,18 +156,23 @@ class CleanerScanner:
         stack = [root]
 
         while stack:
+            if not self.checkpoint():
+                break
             current = stack.pop()
             self.progress(f"正在扫描 Python 缓存：{current}")
             try:
                 with os.scandir(current) as entries:
                     for entry in entries:
+                        if not self.checkpoint():
+                            break
                         path = Path(entry.path)
                         try:
                             if entry.is_symlink() or is_protected_path(path):
                                 continue
                             if entry.is_dir(follow_symlinks=False):
                                 if path.name in PYTHON_CACHE_DIRS or path.name.endswith(".egg-info"):
-                                    results.append(
+                                    self.add_result(
+                                        results,
                                         ScanItem(
                                             category="Python 缓存",
                                             path=path,
@@ -151,7 +186,8 @@ class CleanerScanner:
                             elif entry.is_file(follow_symlinks=False):
                                 name = path.name
                                 if any(fnmatch.fnmatchcase(name, pattern) for pattern in PYTHON_CACHE_PATTERNS):
-                                    results.append(
+                                    self.add_result(
+                                        results,
                                         ScanItem(
                                             category="Python 缓存",
                                             path=path,
@@ -175,7 +211,8 @@ class CleanerScanner:
                     size = path.stat().st_size
                 except (OSError, PermissionError):
                     size = 0
-                results.append(
+                self.add_result(
+                    results,
                     ScanItem(
                         category="隐私文件",
                         path=path,
@@ -210,7 +247,8 @@ class CleanerScanner:
                 size = path.stat().st_size
             except (OSError, PermissionError):
                 size = 0
-            results.append(
+            self.add_result(
+                results,
                 ScanItem(
                     category="文件搜索",
                     path=path,
@@ -234,21 +272,30 @@ class CleanerScanner:
 
         hash_groups: dict[tuple[int, str], list[Path]] = defaultdict(list)
         for size, paths in size_groups.items():
+            if not self.checkpoint():
+                break
             if len(paths) < 2:
                 continue
             for path in paths:
-                checksum = file_sha256(path)
+                if not self.checkpoint():
+                    break
+                checksum = file_sha256(path, checkpoint=self.checkpoint)
                 if checksum:
                     hash_groups[(size, checksum)].append(path)
 
         results: list[ScanItem] = []
         group_number = 1
         for (size, checksum), paths in hash_groups.items():
+            if not self.checkpoint():
+                break
             if len(paths) < 2:
                 continue
             group_id = f"DUP-{group_number:04d}"
             for path in sorted(paths, key=lambda item: os.fspath(item).lower()):
-                results.append(
+                if not self.checkpoint():
+                    break
+                self.add_result(
+                    results,
                     ScanItem(
                         category="重复文件",
                         path=path,
@@ -263,11 +310,13 @@ class CleanerScanner:
         return results
 
 
-def file_sha256(path: Path, chunk_size: int = 1024 * 1024) -> str:
+def file_sha256(path: Path, chunk_size: int = 1024 * 1024, checkpoint: Callable[[], bool] | None = None) -> str:
     digest = hashlib.sha256()
     try:
         with path.open("rb") as handle:
             while True:
+                if checkpoint is not None and not checkpoint():
+                    return ""
                 chunk = handle.read(chunk_size)
                 if not chunk:
                     break
