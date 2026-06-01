@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import queue
 import threading
+import tempfile
 import time
 import tkinter as tk
 import traceback
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
@@ -24,11 +26,13 @@ class CleanerApp(tk.Tk):
         self.minsize(960, 620)
 
         self.items: list[ScanItem] = []
-        self.scan_root = Path.home()
+        self.scan_root = default_scan_root()
         self.report_text = ""
+        self.last_action_summary = ""
         self.worker_queue: queue.Queue[tuple[str, object]] = queue.Queue()
         self.tree_items: dict[str, ScanItem] = {}
         self.checked_paths: set[str] = set()
+        self.preset_buttons: list[ttk.Button] = []
         self.sort_size_desc = False
         self.pause_event = threading.Event()
         self.stop_event = threading.Event()
@@ -58,6 +62,21 @@ class CleanerApp(tk.Tk):
         path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 8))
         self.choose_button = ttk.Button(top, text="选择目录", command=self.choose_folder)
         self.choose_button.pack(side=tk.LEFT)
+
+        presets = ttk.LabelFrame(root, text="常用扫描预设", padding=10)
+        presets.pack(fill=tk.X, pady=(10, 8))
+        self.add_preset_button(presets, "下载目录", lambda: self.set_preset_path(Path.home() / "Downloads"))
+        self.add_preset_button(presets, "桌面", lambda: self.set_preset_path(Path.home() / "Desktop"))
+        self.add_preset_button(presets, "文档", lambda: self.set_preset_path(Path.home() / "Documents"))
+        self.add_preset_button(presets, "视频", lambda: self.set_preset_path(Path.home() / "Videos"))
+        self.add_preset_button(presets, "图片", lambda: self.set_preset_path(Path.home() / "Pictures"))
+        self.add_preset_button(presets, "Python 项目目录", self.choose_python_project_preset)
+        self.add_preset_button(presets, "系统临时目录", lambda: self.set_preset_path(Path(tempfile.gettempdir())))
+        self.add_preset_button(
+            presets,
+            "NVIDIA 缓存",
+            lambda: self.set_preset_path(Path.home() / "AppData" / "Local" / "NVIDIA" / "DXCache"),
+        )
 
         options = ttk.LabelFrame(root, text="扫描选项", padding=10)
         options.pack(fill=tk.X, pady=(10, 8))
@@ -182,6 +201,32 @@ class CleanerApp(tk.Tk):
         if folder:
             self.path_var.set(folder)
 
+    def add_preset_button(self, parent: ttk.Frame, text: str, command: object) -> None:
+        button = ttk.Button(parent, text=text, command=command)
+        button.pack(side=tk.LEFT, padx=(0, 8), pady=2)
+        self.preset_buttons.append(button)
+
+    def set_preset_path(self, path: Path) -> None:
+        if not path.exists():
+            messagebox.showinfo("目录不存在", "该目录不存在，请手动选择目录。")
+            return
+        self.path_var.set(str(path))
+
+    def choose_python_project_preset(self) -> None:
+        default_path = Path(r"D:\py xiangmu")
+        if default_path.exists():
+            self.path_var.set(str(default_path))
+            return
+
+        folder = filedialog.askdirectory(title="选择 Python 项目目录", initialdir=str(Path.home()))
+        if folder:
+            self.path_var.set(folder)
+
+    def set_directory_controls_state(self, state: str) -> None:
+        self.choose_button.configure(state=state)
+        for button in self.preset_buttons:
+            button.configure(state=state)
+
     def pause_scan(self) -> None:
         if not self.scan_active:
             return
@@ -226,10 +271,18 @@ class CleanerApp(tk.Tk):
         except ValueError as exc:
             messagebox.showerror("目录不可扫描", str(exc))
             return
+        if is_c_drive_root(root):
+            should_continue = messagebox.askyesno(
+                "不建议扫描整个 C 盘",
+                "不建议直接扫描整个 C 盘，建议先扫描下载目录、桌面或缓存目录。是否继续？",
+            )
+            if not should_continue:
+                return
 
         self.scan_root = root
         self.items = []
         self.checked_paths.clear()
+        self.last_action_summary = ""
         self.pause_event.clear()
         self.stop_event.clear()
         self.scan_active = True
@@ -238,7 +291,7 @@ class CleanerApp(tk.Tk):
         self.status_var.set("正在扫描。默认只扫描，不会删除任何文件。")
         self.last_scan_status = "正在扫描。默认只扫描，不会删除任何文件。"
         self.scan_button.configure(state=tk.DISABLED)
-        self.choose_button.configure(state=tk.DISABLED)
+        self.set_directory_controls_state(tk.DISABLED)
         self.pause_button.configure(state=tk.NORMAL)
         self.resume_button.configure(state=tk.DISABLED)
         self.stop_button.configure(state=tk.NORMAL)
@@ -318,7 +371,7 @@ class CleanerApp(tk.Tk):
         self.refresh_results()
         self.set_report(report)
         self.scan_button.configure(state=tk.NORMAL)
-        self.choose_button.configure(state=tk.NORMAL)
+        self.set_directory_controls_state(tk.NORMAL)
         self.pause_button.configure(state=tk.DISABLED)
         self.resume_button.configure(state=tk.DISABLED)
         self.stop_button.configure(state=tk.DISABLED)
@@ -380,17 +433,20 @@ class CleanerApp(tk.Tk):
         else:
             self.checked_paths.add(key)
         self.refresh_results()
+        self.refresh_report_summary()
         return "break"
 
     def check_all_visible(self) -> None:
         for item in self.get_visible_items():
             self.checked_paths.add(self.item_key(item))
         self.refresh_results()
+        self.refresh_report_summary()
 
     def uncheck_all_visible(self) -> None:
         for item in self.get_visible_items():
             self.checked_paths.discard(self.item_key(item))
         self.refresh_results()
+        self.refresh_report_summary()
 
     def check_recommended_items(self) -> None:
         self.checked_paths.clear()
@@ -398,6 +454,7 @@ class CleanerApp(tk.Tk):
             if item.risk_level == "推荐清理":
                 self.checked_paths.add(self.item_key(item))
         self.refresh_results()
+        self.refresh_report_summary()
 
     def get_visible_indexed_items(self) -> list[tuple[int, ScanItem]]:
         filter_text = self.result_filter_var.get().strip().lower()
@@ -438,6 +495,18 @@ class CleanerApp(tk.Tk):
     def on_result_filter_changed(self, *_args: object) -> None:
         if hasattr(self, "tree"):
             self.refresh_results()
+
+    def refresh_report_summary(self) -> None:
+        if not self.items or self.scan_active:
+            return
+        self.report_text = build_report(
+            self.items,
+            self.scan_root,
+            0,
+            checked_items=self.get_checked_items(),
+            extra_text=self.last_action_summary,
+        )
+        self.set_report(self.report_text)
 
     def set_report(self, content: str) -> None:
         self.report.configure(state=tk.NORMAL)
@@ -550,9 +619,8 @@ class CleanerApp(tk.Tk):
 
         self.items = [item for item in self.items if str(item.path) not in deleted_paths]
         self.checked_paths = {self.item_key(item) for item in self.items if self.item_key(item) in self.checked_paths}
-        self.report_text = build_report(self.items, self.scan_root, 0, after_delete=True)
-        self.report_text += (
-            "\n\n最近处理结果："
+        self.last_action_summary = (
+            "最近处理结果："
             f"\n- 操作：移动勾选项到回收站"
             f"\n- 勾选数量：{checked_count}"
             f"\n- 可处理数量：{processable_count}"
@@ -560,6 +628,14 @@ class CleanerApp(tk.Tk):
             f"\n- 成功移动数量：{len(deleted_paths)}"
             f"\n- 失败数量：{len(failures)}"
             f"\n- 预计释放空间：{format_size(total_size)}"
+        )
+        self.report_text = build_report(
+            self.items,
+            self.scan_root,
+            0,
+            after_delete=True,
+            checked_items=self.get_checked_items(),
+            extra_text=self.last_action_summary,
         )
         self.refresh_results()
         self.set_report(self.report_text)
@@ -575,18 +651,52 @@ class CleanerApp(tk.Tk):
             messagebox.showinfo("移动完成", f"已移动 {len(deleted_paths)} 项到回收站。")
 
 
-def build_report(items: list[ScanItem], root: Path, elapsed: float, after_delete: bool = False) -> str:
+def build_report(
+    items: list[ScanItem],
+    root: Path,
+    elapsed: float,
+    after_delete: bool = False,
+    checked_items: list[ScanItem] | None = None,
+    extra_text: str = "",
+) -> str:
     counts = Counter(item.category for item in items)
     risk_counts = Counter(item.risk_level for item in items)
     total_size = sum(item.size_bytes for item in items)
     duplicate_groups = len({item.duplicate_group for item in items if item.duplicate_group})
+    checked_items = checked_items or []
+    risk_sizes = risk_size_totals(items)
+    checked_size = sum(item.size_bytes for item in checked_items)
+    advice = build_cleaning_advice(items)
 
     lines = [
-        "Windows 本地电脑清理助手报告",
+        "清理建议汇总",
+        f"扫描时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"扫描目录：{root}",
+        f"总结果数量：{len(items)}",
+        f"总文件大小：{format_size(total_size)}",
+        f"推荐清理：{risk_counts.get('推荐清理', 0)} 个，合计 {format_size(risk_sizes.get('推荐清理', 0))}",
+        f"谨慎处理：{risk_counts.get('谨慎处理', 0)} 个，合计 {format_size(risk_sizes.get('谨慎处理', 0))}",
+        f"不建议删除：{risk_counts.get('不建议删除', 0)} 个，合计 {format_size(risk_sizes.get('不建议删除', 0))}",
+        f"重复文件组数量：{duplicate_groups}",
+        f"已勾选数量：{len(checked_items)}",
+        f"已勾选预计释放空间：{format_size(checked_size)}",
+        "",
+        "清理建议：",
+    ]
+    lines.extend(f"- {message}" for message in advice)
+    lines.extend(
+        [
+            "",
+            "Windows 本地电脑清理助手报告",
+        ]
+    )
+    lines.extend(
+        [
         f"扫描目录：{root}",
         f"结果数量：{len(items)}",
         f"结果总大小：{format_size(total_size)}",
-    ]
+        ]
+    )
     if elapsed:
         lines.append(f"扫描耗时：{elapsed:.1f} 秒")
     if after_delete:
@@ -617,7 +727,52 @@ def build_report(items: list[ScanItem], root: Path, elapsed: float, after_delete
             "- 建议删除前先导出 Excel 报告。",
         ]
     )
+    if extra_text:
+        lines.extend(["", extra_text])
     return "\n".join(lines)
+
+
+def risk_size_totals(items: list[ScanItem]) -> dict[str, int]:
+    totals = {"推荐清理": 0, "谨慎处理": 0, "不建议删除": 0}
+    for item in items:
+        totals[item.risk_level] = totals.get(item.risk_level, 0) + item.size_bytes
+    return totals
+
+
+def build_cleaning_advice(items: list[ScanItem]) -> list[str]:
+    paths = [str(item.path).lower().replace("/", "\\") for item in items]
+    categories = {item.category for item in items}
+    advice: list[str] = []
+
+    if "Python 缓存" in categories or any("__pycache__" in path or path.endswith(".pyc") for path in paths):
+        advice.append("存在 Python 缓存，建议优先清理 Python 缓存。")
+    if any("temp" in path for path in paths):
+        advice.append("存在 Temp 临时文件，建议优先清理临时文件。")
+    if any("dxcache" in path for path in paths):
+        advice.append("存在 NVIDIA DXCache，缓存可以清理，但下次启动游戏可能重新生成。")
+    if any("graphicscache" in path for path in paths):
+        advice.append("存在 GraphicsCache，游戏图形缓存可以清理，但游戏可能重新生成。")
+    if any(keyword in path for path in paths for keyword in ("tencent", "wechat", "wxwork", "qq")):
+        advice.append("存在 Tencent、WeChat、WXWork 或 QQ 目录，聊天软件数据需谨慎处理。")
+    if any(keyword in path for path in paths for keyword in ("pagefile.sys", "windows", "program files")):
+        advice.append("存在 pagefile.sys、Windows 或 Program Files 相关路径，系统关键文件不建议处理。")
+
+    if not advice:
+        advice.append("未发现明确路径建议，请结合风险等级人工判断。")
+    advice.append("清理建议只做提示，不会自动勾选或自动处理文件。")
+    return advice
+
+
+def default_scan_root() -> Path:
+    downloads = Path.home() / "Downloads"
+    if downloads.exists():
+        return downloads
+    return Path.home()
+
+
+def is_c_drive_root(path: Path) -> bool:
+    normalized = str(path.expanduser().resolve(strict=False)).replace("/", "\\").rstrip("\\").lower()
+    return normalized == "c:"
 
 
 def main() -> None:

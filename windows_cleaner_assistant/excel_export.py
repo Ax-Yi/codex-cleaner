@@ -7,12 +7,13 @@ from datetime import datetime
 from pathlib import Path
 from xml.sax.saxutils import quoteattr
 
-from .models import ScanItem
+from .models import ScanItem, format_size
 
 
 def export_scan_results(path: Path, items: list[ScanItem], scan_root: Path, report_text: str) -> None:
     sheets = [
         ("清理报告", report_rows(items, scan_root, report_text)),
+        ("清理建议", advice_rows(items, scan_root)),
         ("扫描结果", result_rows(items)),
     ]
 
@@ -44,6 +45,59 @@ def report_rows(items: list[ScanItem], scan_root: Path, report_text: str) -> lis
     rows.extend([[], ["报告摘要", ""]])
     rows.extend([[line, ""] for line in report_text.splitlines()])
     return rows
+
+
+def advice_rows(items: list[ScanItem], scan_root: Path) -> list[list[object]]:
+    risk_counts = Counter(item.risk_level for item in items)
+    risk_sizes = risk_size_totals(items)
+    rows: list[list[object]] = [
+        ["清理建议", ""],
+        ["扫描目录", str(scan_root)],
+        ["扫描时间", datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
+        ["总结果数量", len(items)],
+        ["总文件大小", format_size(sum(item.size_bytes for item in items))],
+        ["推荐清理数量", risk_counts.get("推荐清理", 0)],
+        ["推荐清理大小", format_size(risk_sizes.get("推荐清理", 0))],
+        ["谨慎处理数量", risk_counts.get("谨慎处理", 0)],
+        ["谨慎处理大小", format_size(risk_sizes.get("谨慎处理", 0))],
+        ["不建议删除数量", risk_counts.get("不建议删除", 0)],
+        ["不建议删除大小", format_size(risk_sizes.get("不建议删除", 0))],
+        [],
+        ["建议文字", ""],
+    ]
+    rows.extend([[message, ""] for message in build_cleaning_advice(items)])
+    return rows
+
+
+def risk_size_totals(items: list[ScanItem]) -> dict[str, int]:
+    totals = {"推荐清理": 0, "谨慎处理": 0, "不建议删除": 0}
+    for item in items:
+        totals[item.risk_level] = totals.get(item.risk_level, 0) + item.size_bytes
+    return totals
+
+
+def build_cleaning_advice(items: list[ScanItem]) -> list[str]:
+    paths = [str(item.path).lower().replace("/", "\\") for item in items]
+    categories = {item.category for item in items}
+    advice: list[str] = []
+
+    if "Python 缓存" in categories or any("__pycache__" in path or path.endswith(".pyc") for path in paths):
+        advice.append("存在 Python 缓存，建议优先清理 Python 缓存。")
+    if any("temp" in path for path in paths):
+        advice.append("存在 Temp 临时文件，建议优先清理临时文件。")
+    if any("dxcache" in path for path in paths):
+        advice.append("存在 NVIDIA DXCache，缓存可以清理，但下次启动游戏可能重新生成。")
+    if any("graphicscache" in path for path in paths):
+        advice.append("存在 GraphicsCache，游戏图形缓存可以清理，但游戏可能重新生成。")
+    if any(keyword in path for path in paths for keyword in ("tencent", "wechat", "wxwork", "qq")):
+        advice.append("存在 Tencent、WeChat、WXWork 或 QQ 目录，聊天软件数据需谨慎处理。")
+    if any(keyword in path for path in paths for keyword in ("pagefile.sys", "windows", "program files")):
+        advice.append("存在 pagefile.sys、Windows 或 Program Files 相关路径，系统关键文件不建议处理。")
+
+    if not advice:
+        advice.append("未发现明确路径建议，请结合风险等级人工判断。")
+    advice.append("清理建议只做提示，不会自动勾选或自动处理文件。")
+    return advice
 
 
 def result_rows(items: list[ScanItem]) -> list[list[object]]:
