@@ -628,7 +628,7 @@ class CleanerApp(tk.Tk):
                     values=(
                         "☑" if key in self.checked_paths else "☐",
                         group_id,
-                        "是" if recommended is not None and self.item_key(recommended) == key else "请手动确认"
+                        "是" if recommended is not None and self.item_key(recommended) == key else "谨慎处理，请手动确认"
                         if recommended is None
                         else "",
                         len(group_items),
@@ -1102,7 +1102,7 @@ def path_requires_manual_duplicate_review(path: Path) -> bool:
         "windows",
         "program files",
         "programdata",
-        "appdata\\roaming\\tencent",
+        "tencent",
         "wechat",
         "wxwork",
         "qq",
@@ -1132,7 +1132,7 @@ def build_duplicate_group_text(groups: dict[str, list[ScanItem]], checked_keys: 
         lines.append("")
         lines.append(f"{group_id}（{len(group_items)} 个文件）")
         if recommended is None:
-            lines.append("推荐保留文件：请手动确认")
+            lines.append("推荐保留文件：谨慎处理，请手动确认")
         else:
             lines.append(f"推荐保留文件：{recommended.path}")
         for item in sorted(group_items, key=lambda value: str(value.path).lower()):

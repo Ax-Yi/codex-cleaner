@@ -143,7 +143,7 @@ def duplicate_group_rows(items: list[ScanItem], checked_keys: set[str]) -> list[
                     str(item.path),
                     item.display_size,
                     format_modified_time(item.path),
-                    "请手动确认"
+                    "谨慎处理，请手动确认"
                     if recommended is None
                     else "是"
                     if scan_item_key(item) == scan_item_key(recommended)
@@ -176,7 +176,7 @@ def path_requires_manual_duplicate_review(path: Path) -> bool:
         "windows",
         "program files",
         "programdata",
-        "appdata\\roaming\\tencent",
+        "tencent",
         "wechat",
         "wxwork",
         "qq",
