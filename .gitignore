@@ -30,6 +30,8 @@ build/
 *_report.txt
 *_report.xlsx
 delete_log.txt
+history.json
+history.json
 
 # Temporary files
 temp*/

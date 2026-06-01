@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import queue
 import threading
 import tempfile
@@ -13,7 +14,8 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from .delete import SEND2TRASH_INSTALL_MESSAGE, delete_path, send2trash_available
 from .excel_export import export_scan_results
-from .models import RISK_NOT_RECOMMENDED, ScanItem, format_size
+from .history import clear_scan_history, load_scan_history, save_scan_history
+from .models import RISK_CAUTION, RISK_NOT_RECOMMENDED, RISK_RECOMMENDED, ScanItem, format_size, scan_item_key
 from .safety import validate_scan_root
 from .scanner import CleanerScanner
 
@@ -99,6 +101,8 @@ class CleanerApp(tk.Tk):
         self.stop_button.pack(side=tk.LEFT, padx=(8, 0))
         self.export_button = ttk.Button(actions, text="导出 Excel 报告", command=self.export_excel, state=tk.DISABLED)
         self.export_button.pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(actions, text="查看扫描历史", command=self.show_scan_history).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(actions, text="查看扫描历史", command=self.show_scan_history).pack(side=tk.LEFT, padx=(8, 0))
         self.progress = ttk.Progressbar(actions, mode="indeterminate", length=180)
         self.progress.pack(side=tk.RIGHT)
 
@@ -137,6 +141,9 @@ class CleanerApp(tk.Tk):
         ttk.Button(selection_frame, text="全选", command=self.check_all_visible).pack(side=tk.LEFT)
         ttk.Button(selection_frame, text="取消全选", command=self.uncheck_all_visible).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(selection_frame, text="只选择推荐清理", command=self.check_recommended_items).pack(
+            side=tk.LEFT, padx=(8, 0)
+        )
+        ttk.Button(selection_frame, text="查看重复文件分组", command=self.show_duplicate_groups).pack(
             side=tk.LEFT, padx=(8, 0)
         )
         self.delete_button = ttk.Button(
@@ -380,7 +387,98 @@ class CleanerApp(tk.Tk):
         if stopped:
             self.status_var.set("扫描已停止，已保留当前结果")
         else:
+            save_scan_history(items, self.scan_root)
+            try:
+                save_scan_history(items, self.scan_root)
+            except OSError as exc:
+                messagebox.showwarning("历史记录保存失败", str(exc))
             self.status_var.set(f"扫描完成，共发现 {len(items)} 条结果。默认未删除任何文件。")
+
+    def show_scan_history(self) -> None:
+        records = load_scan_history()
+        window = tk.Toplevel(self)
+        window.title("扫描历史记录")
+        window.geometry("1180x520")
+        window.minsize(980, 420)
+
+        toolbar = ttk.Frame(window, padding=8)
+        toolbar.pack(fill=tk.X)
+        ttk.Button(toolbar, text="清空历史记录", command=lambda: self.clear_scan_history(window, tree)).pack(
+            side=tk.LEFT
+        )
+
+        frame = ttk.Frame(window, padding=(8, 0, 8, 8))
+        frame.pack(fill=tk.BOTH, expand=True)
+        columns = (
+            "scan_time",
+            "scan_dir",
+            "result_count",
+            "total_size",
+            "recommended",
+            "caution",
+            "not_recommended",
+            "duplicate_groups",
+        )
+        tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse")
+        headings = {
+            "scan_time": "扫描时间",
+            "scan_dir": "扫描目录",
+            "result_count": "结果数量",
+            "total_size": "总大小",
+            "recommended": "推荐清理",
+            "caution": "谨慎处理",
+            "not_recommended": "不建议删除",
+            "duplicate_groups": "重复文件组",
+        }
+        widths = {
+            "scan_time": 160,
+            "scan_dir": 360,
+            "result_count": 80,
+            "total_size": 100,
+            "recommended": 150,
+            "caution": 150,
+            "not_recommended": 150,
+            "duplicate_groups": 90,
+        }
+        for column in columns:
+            tree.heading(column, text=headings[column])
+            tree.column(column, width=widths[column], minwidth=60, anchor=tk.W)
+
+        y_scroll = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=tree.yview)
+        x_scroll = ttk.Scrollbar(frame, orient=tk.HORIZONTAL, command=tree.xview)
+        tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+        tree.grid(row=0, column=0, sticky="nsew")
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        x_scroll.grid(row=1, column=0, sticky="ew")
+        frame.rowconfigure(0, weight=1)
+        frame.columnconfigure(0, weight=1)
+        self.populate_scan_history_tree(tree, records)
+
+    def populate_scan_history_tree(self, tree: ttk.Treeview, records: list[dict[str, object]]) -> None:
+        tree.delete(*tree.get_children())
+        for index, record in enumerate(reversed(records)):
+            tree.insert(
+                "",
+                tk.END,
+                iid=str(index),
+                values=(
+                    record.get("scan_time", ""),
+                    record.get("scan_dir", ""),
+                    record.get("result_count", 0),
+                    record.get("total_size", ""),
+                    f"{record.get('recommended_count', 0)} 个 / {record.get('recommended_size', '0 B')}",
+                    f"{record.get('caution_count', 0)} 个 / {record.get('caution_size', '0 B')}",
+                    f"{record.get('not_recommended_count', 0)} 个 / {record.get('not_recommended_size', '0 B')}",
+                    record.get("duplicate_group_count", 0),
+                ),
+            )
+
+    def clear_scan_history(self, window: tk.Toplevel, tree: ttk.Treeview) -> None:
+        if not messagebox.askyesno("清空历史记录", "确定清空所有扫描历史记录吗？", parent=window):
+            return
+        save_history_records([])
+        self.populate_scan_history_tree(tree, [])
+        messagebox.showinfo("已清空", "扫描历史记录已清空。", parent=window)
 
     def refresh_results(self) -> None:
         self.tree.delete(*self.tree.get_children())
@@ -406,15 +504,7 @@ class CleanerApp(tk.Tk):
             )
 
     def item_key(self, item: ScanItem) -> str:
-        return "\0".join(
-            [
-                str(item.path),
-                item.category,
-                item.reason,
-                item.duplicate_group,
-                item.checksum,
-            ]
-        )
+        return scan_item_key(item)
 
     def on_tree_click(self, event: tk.Event) -> str | None:
         if self.tree.identify_region(event.x, event.y) != "cell":
@@ -455,6 +545,149 @@ class CleanerApp(tk.Tk):
                 self.checked_paths.add(self.item_key(item))
         self.refresh_results()
         self.refresh_report_summary()
+
+    def show_duplicate_groups(self) -> None:
+        groups = duplicate_groups(self.items)
+        if not groups:
+            messagebox.showinfo("没有重复文件", "当前扫描结果中没有重复文件分组。")
+            return
+
+        window = tk.Toplevel(self)
+        window.title("重复文件分组")
+        window.geometry("1180x640")
+        window.minsize(980, 520)
+
+        toolbar = ttk.Frame(window, padding=8)
+        toolbar.pack(fill=tk.X)
+        ttk.Button(toolbar, text="只勾选重复副本", command=lambda: self.check_duplicate_copies(tree, groups)).pack(
+            side=tk.LEFT
+        )
+        ttk.Button(toolbar, text="清空重复文件勾选", command=lambda: self.clear_duplicate_checks(tree, groups)).pack(
+            side=tk.LEFT, padx=(8, 0)
+        )
+        ttk.Button(toolbar, text="复制重复组信息", command=lambda: self.copy_duplicate_group_info(groups)).pack(
+            side=tk.LEFT, padx=(8, 0)
+        )
+
+        frame = ttk.Frame(window, padding=(8, 0, 8, 8))
+        frame.pack(fill=tk.BOTH, expand=True)
+        columns = ("selected", "group", "keep", "count", "path", "size", "modified", "risk", "suggestion")
+        tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse")
+        headings = {
+            "selected": "选择",
+            "group": "重复组编号",
+            "keep": "推荐保留",
+            "count": "组内数量",
+            "path": "完整路径",
+            "size": "文件大小",
+            "modified": "修改时间",
+            "risk": "风险等级",
+            "suggestion": "处理建议",
+        }
+        widths = {
+            "selected": 60,
+            "group": 110,
+            "keep": 110,
+            "count": 80,
+            "path": 460,
+            "size": 100,
+            "modified": 150,
+            "risk": 100,
+            "suggestion": 260,
+        }
+        for column in columns:
+            tree.heading(column, text=headings[column])
+            tree.column(column, width=widths[column], minwidth=60, anchor=tk.W)
+
+        y_scroll = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=tree.yview)
+        x_scroll = ttk.Scrollbar(frame, orient=tk.HORIZONTAL, command=tree.xview)
+        tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+        tree.grid(row=0, column=0, sticky="nsew")
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        x_scroll.grid(row=1, column=0, sticky="ew")
+        frame.rowconfigure(0, weight=1)
+        frame.columnconfigure(0, weight=1)
+        tree.item_keys = {}  # type: ignore[attr-defined]
+        tree.bind("<Button-1>", lambda event: self.on_duplicate_tree_click(event, tree, groups))
+        self.refresh_duplicate_tree(tree, groups)
+
+    def refresh_duplicate_tree(self, tree: ttk.Treeview, groups: dict[str, list[ScanItem]]) -> None:
+        tree.delete(*tree.get_children())
+        tree.item_keys = {}  # type: ignore[attr-defined]
+        for group_id in sorted(groups):
+            group_items = sorted(groups[group_id], key=lambda item: str(item.path).lower())
+            recommended = recommended_duplicate_keep(group_items)
+            for item in group_items:
+                iid = f"{group_id}:{len(tree.item_keys)}"  # type: ignore[attr-defined]
+                key = self.item_key(item)
+                tree.item_keys[iid] = key  # type: ignore[attr-defined]
+                tree.insert(
+                    "",
+                    tk.END,
+                    iid=iid,
+                    values=(
+                        "☑" if key in self.checked_paths else "☐",
+                        group_id,
+                        "是" if recommended is not None and self.item_key(recommended) == key else "请手动确认"
+                        if recommended is None
+                        else "",
+                        len(group_items),
+                        str(item.path),
+                        item.display_size,
+                        format_modified_time(item.path),
+                        item.risk_level,
+                        item.suggestion,
+                    ),
+                )
+
+    def on_duplicate_tree_click(
+        self, event: tk.Event, tree: ttk.Treeview, groups: dict[str, list[ScanItem]]
+    ) -> str | None:
+        if tree.identify_region(event.x, event.y) != "cell" or tree.identify_column(event.x) != "#1":
+            return None
+        row_id = tree.identify_row(event.y)
+        if not row_id:
+            return "break"
+        key = tree.item_keys.get(row_id)  # type: ignore[attr-defined]
+        if not key:
+            return "break"
+        if key in self.checked_paths:
+            self.checked_paths.remove(key)
+        else:
+            self.checked_paths.add(key)
+        self.refresh_results()
+        self.refresh_report_summary()
+        self.refresh_duplicate_tree(tree, groups)
+        return "break"
+
+    def check_duplicate_copies(self, tree: ttk.Treeview, groups: dict[str, list[ScanItem]]) -> None:
+        for group_items in groups.values():
+            recommended = recommended_duplicate_keep(group_items)
+            if recommended is None:
+                continue
+            recommended_key = self.item_key(recommended)
+            for item in group_items:
+                if self.item_key(item) == recommended_key:
+                    continue
+                if item.risk_level == RISK_RECOMMENDED:
+                    self.checked_paths.add(self.item_key(item))
+        self.refresh_results()
+        self.refresh_report_summary()
+        self.refresh_duplicate_tree(tree, groups)
+
+    def clear_duplicate_checks(self, tree: ttk.Treeview, groups: dict[str, list[ScanItem]]) -> None:
+        for group_items in groups.values():
+            for item in group_items:
+                self.checked_paths.discard(self.item_key(item))
+        self.refresh_results()
+        self.refresh_report_summary()
+        self.refresh_duplicate_tree(tree, groups)
+
+    def copy_duplicate_group_info(self, groups: dict[str, list[ScanItem]]) -> None:
+        text = build_duplicate_group_text(groups, self.checked_paths)
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        messagebox.showinfo("已复制", "重复组信息已复制到剪贴板。")
 
     def get_visible_indexed_items(self) -> list[tuple[int, ScanItem]]:
         filter_text = self.result_filter_var.get().strip().lower()
@@ -514,6 +747,92 @@ class CleanerApp(tk.Tk):
         self.report.insert("1.0", content)
         self.report.configure(state=tk.DISABLED)
 
+    def show_scan_history(self) -> None:
+        window = tk.Toplevel(self)
+        window.title("扫描历史记录")
+        window.geometry("1120x520")
+        window.minsize(920, 420)
+
+        toolbar = ttk.Frame(window, padding=8)
+        toolbar.pack(fill=tk.X)
+        ttk.Button(toolbar, text="清空历史记录", command=lambda: self.clear_history_window(tree)).pack(side=tk.LEFT)
+
+        frame = ttk.Frame(window, padding=(8, 0, 8, 8))
+        frame.pack(fill=tk.BOTH, expand=True)
+        columns = (
+            "scan_time",
+            "scan_root",
+            "result_count",
+            "total_size",
+            "recommended",
+            "caution",
+            "not_recommended",
+            "duplicate_groups",
+        )
+        tree = ttk.Treeview(frame, columns=columns, show="headings")
+        headings = {
+            "scan_time": "扫描时间",
+            "scan_root": "扫描目录",
+            "result_count": "结果数量",
+            "total_size": "总大小",
+            "recommended": "推荐清理",
+            "caution": "谨慎处理",
+            "not_recommended": "不建议删除",
+            "duplicate_groups": "重复文件组",
+        }
+        widths = {
+            "scan_time": 150,
+            "scan_root": 360,
+            "result_count": 80,
+            "total_size": 100,
+            "recommended": 150,
+            "caution": 150,
+            "not_recommended": 150,
+            "duplicate_groups": 90,
+        }
+        for column in columns:
+            tree.heading(column, text=headings[column])
+            tree.column(column, width=widths[column], minwidth=70, anchor=tk.W)
+
+        y_scroll = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=tree.yview)
+        x_scroll = ttk.Scrollbar(frame, orient=tk.HORIZONTAL, command=tree.xview)
+        tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+        tree.grid(row=0, column=0, sticky="nsew")
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        x_scroll.grid(row=1, column=0, sticky="ew")
+        frame.rowconfigure(0, weight=1)
+        frame.columnconfigure(0, weight=1)
+        self.refresh_history_tree(tree)
+
+    def refresh_history_tree(self, tree: ttk.Treeview) -> None:
+        tree.delete(*tree.get_children())
+        for index, record in enumerate(reversed(load_scan_history())):
+            tree.insert(
+                "",
+                tk.END,
+                iid=str(index),
+                values=(
+                    record.get("scan_time", ""),
+                    record.get("scan_root", ""),
+                    record.get("result_count", 0),
+                    record.get("total_size", ""),
+                    f"{record.get('recommended_count', 0)} / {record.get('recommended_size', '')}",
+                    f"{record.get('caution_count', 0)} / {record.get('caution_size', '')}",
+                    f"{record.get('not_recommended_count', 0)} / {record.get('not_recommended_size', '')}",
+                    record.get("duplicate_group_count", 0),
+                ),
+            )
+
+    def clear_history_window(self, tree: ttk.Treeview) -> None:
+        if not messagebox.askyesno("清空历史记录", "确定要清空所有扫描历史记录吗？"):
+            return
+        try:
+            clear_scan_history()
+        except OSError as exc:
+            messagebox.showerror("清空失败", str(exc))
+            return
+        self.refresh_history_tree(tree)
+
     def export_excel(self) -> None:
         if not self.items:
             messagebox.showinfo("没有结果", "当前没有可导出的扫描结果。")
@@ -543,7 +862,7 @@ class CleanerApp(tk.Tk):
             return
         try:
             report_text = self.report_text if export_all else build_report(items_to_export, self.scan_root, 0)
-            export_scan_results(Path(output), items_to_export, self.scan_root, report_text)
+            export_scan_results(Path(output), items_to_export, self.scan_root, report_text, self.checked_paths)
         except OSError as exc:
             messagebox.showerror("导出失败", str(exc))
             return
@@ -761,6 +1080,125 @@ def build_cleaning_advice(items: list[ScanItem]) -> list[str]:
         advice.append("未发现明确路径建议，请结合风险等级人工判断。")
     advice.append("清理建议只做提示，不会自动勾选或自动处理文件。")
     return advice
+
+
+def duplicate_groups(items: list[ScanItem]) -> dict[str, list[ScanItem]]:
+    groups: dict[str, list[ScanItem]] = {}
+    for item in items:
+        if item.duplicate_group:
+            groups.setdefault(item.duplicate_group, []).append(item)
+    return {group_id: group_items for group_id, group_items in groups.items() if len(group_items) > 1}
+
+
+def recommended_duplicate_keep(items: list[ScanItem]) -> ScanItem | None:
+    if any(path_requires_manual_duplicate_review(item.path) for item in items):
+        return None
+    return sorted(items, key=lambda item: (-modified_timestamp(item.path), len(str(item.path)), str(item.path).lower()))[0]
+
+
+def path_requires_manual_duplicate_review(path: Path) -> bool:
+    normalized = str(path).lower().replace("/", "\\")
+    keywords = (
+        "windows",
+        "program files",
+        "programdata",
+        "appdata\\roaming\\tencent",
+        "wechat",
+        "wxwork",
+        "qq",
+    )
+    return any(keyword in normalized for keyword in keywords)
+
+
+def modified_timestamp(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except (OSError, PermissionError):
+        return 0.0
+
+
+def format_modified_time(path: Path) -> str:
+    timestamp = modified_timestamp(path)
+    if not timestamp:
+        return "无法读取"
+    return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def build_duplicate_group_text(groups: dict[str, list[ScanItem]], checked_keys: set[str]) -> str:
+    lines: list[str] = ["重复文件分组信息"]
+    for group_id in sorted(groups):
+        group_items = groups[group_id]
+        recommended = recommended_duplicate_keep(group_items)
+        lines.append("")
+        lines.append(f"{group_id}（{len(group_items)} 个文件）")
+        if recommended is None:
+            lines.append("推荐保留文件：请手动确认")
+        else:
+            lines.append(f"推荐保留文件：{recommended.path}")
+        for item in sorted(group_items, key=lambda value: str(value.path).lower()):
+            keep = recommended is not None and scan_item_key(item) == scan_item_key(recommended)
+            checked = scan_item_key(item) in checked_keys
+            lines.append(
+                f"- 路径：{item.path} | 大小：{item.display_size} | 修改时间：{format_modified_time(item.path)} "
+                f"| 推荐保留：{'是' if keep else '否'} | 已勾选：{'是' if checked else '否'} "
+                f"| 风险等级：{item.risk_level} | 建议：{item.suggestion}"
+            )
+    return "\n".join(lines)
+
+
+def history_path() -> Path:
+    return Path.cwd() / "history.json"
+
+
+def load_scan_history() -> list[dict[str, object]]:
+    path = history_path()
+    if not path.exists():
+        return []
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [record for record in data if isinstance(record, dict)]
+
+
+def save_history_records(records: list[dict[str, object]]) -> None:
+    with history_path().open("w", encoding="utf-8") as handle:
+        json.dump(records, handle, ensure_ascii=False, indent=2)
+
+
+def save_scan_history(items: list[ScanItem], root: Path) -> None:
+    records = load_scan_history()
+    records.append(build_history_record(items, root))
+    try:
+        save_history_records(records)
+    except OSError:
+        return
+
+
+def build_history_record(items: list[ScanItem], root: Path) -> dict[str, object]:
+    risk_counts = Counter(item.risk_level for item in items)
+    risk_sizes = risk_size_totals(items)
+    total_size = sum(item.size_bytes for item in items)
+    return {
+        "scan_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "scan_dir": str(root),
+        "result_count": len(items),
+        "total_size_bytes": total_size,
+        "total_size": format_size(total_size),
+        "recommended_count": risk_counts.get("推荐清理", 0),
+        "recommended_size_bytes": risk_sizes.get("推荐清理", 0),
+        "recommended_size": format_size(risk_sizes.get("推荐清理", 0)),
+        "caution_count": risk_counts.get("谨慎处理", 0),
+        "caution_size_bytes": risk_sizes.get("谨慎处理", 0),
+        "caution_size": format_size(risk_sizes.get("谨慎处理", 0)),
+        "not_recommended_count": risk_counts.get("不建议删除", 0),
+        "not_recommended_size_bytes": risk_sizes.get("不建议删除", 0),
+        "not_recommended_size": format_size(risk_sizes.get("不建议删除", 0)),
+        "duplicate_group_count": len(duplicate_groups(items)),
+    }
 
 
 def default_scan_root() -> Path:

@@ -7,13 +7,21 @@ from datetime import datetime
 from pathlib import Path
 from xml.sax.saxutils import quoteattr
 
-from .models import ScanItem, format_size
+from .models import ScanItem, format_size, scan_item_key
 
 
-def export_scan_results(path: Path, items: list[ScanItem], scan_root: Path, report_text: str) -> None:
+def export_scan_results(
+    path: Path,
+    items: list[ScanItem],
+    scan_root: Path,
+    report_text: str,
+    checked_keys: set[str] | None = None,
+) -> None:
+    checked_keys = checked_keys or set()
     sheets = [
         ("清理报告", report_rows(items, scan_root, report_text)),
         ("清理建议", advice_rows(items, scan_root)),
+        ("重复文件分组", duplicate_group_rows(items, checked_keys)),
         ("扫描结果", result_rows(items)),
     ]
 
@@ -120,6 +128,74 @@ def result_rows(items: list[ScanItem]) -> list[list[object]]:
             ]
         )
     return rows
+
+
+def duplicate_group_rows(items: list[ScanItem], checked_keys: set[str]) -> list[list[object]]:
+    rows: list[list[object]] = [
+        ["重复组编号", "文件路径", "文件大小", "修改时间", "是否推荐保留", "是否被勾选", "风险等级", "处理建议"]
+    ]
+    for group_id, group_items in sorted(duplicate_groups(items).items()):
+        recommended = recommended_duplicate_keep(group_items)
+        for item in sorted(group_items, key=lambda value: str(value.path).lower()):
+            rows.append(
+                [
+                    group_id,
+                    str(item.path),
+                    item.display_size,
+                    format_modified_time(item.path),
+                    "请手动确认"
+                    if recommended is None
+                    else "是"
+                    if scan_item_key(item) == scan_item_key(recommended)
+                    else "否",
+                    "是" if scan_item_key(item) in checked_keys else "否",
+                    item.risk_level,
+                    item.suggestion,
+                ]
+            )
+    return rows
+
+
+def duplicate_groups(items: list[ScanItem]) -> dict[str, list[ScanItem]]:
+    groups: dict[str, list[ScanItem]] = {}
+    for item in items:
+        if item.duplicate_group:
+            groups.setdefault(item.duplicate_group, []).append(item)
+    return {group_id: group_items for group_id, group_items in groups.items() if len(group_items) > 1}
+
+
+def recommended_duplicate_keep(items: list[ScanItem]) -> ScanItem | None:
+    if any(path_requires_manual_duplicate_review(item.path) for item in items):
+        return None
+    return sorted(items, key=lambda item: (-modified_timestamp(item.path), len(str(item.path)), str(item.path).lower()))[0]
+
+
+def path_requires_manual_duplicate_review(path: Path) -> bool:
+    normalized = str(path).lower().replace("/", "\\")
+    keywords = (
+        "windows",
+        "program files",
+        "programdata",
+        "appdata\\roaming\\tencent",
+        "wechat",
+        "wxwork",
+        "qq",
+    )
+    return any(keyword in normalized for keyword in keywords)
+
+
+def modified_timestamp(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except (OSError, PermissionError):
+        return 0.0
+
+
+def format_modified_time(path: Path) -> str:
+    timestamp = modified_timestamp(path)
+    if not timestamp:
+        return "无法读取"
+    return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def content_types_xml(sheet_count: int) -> str:

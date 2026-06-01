@@ -67,6 +67,18 @@ class ScanItem:
         return format_size(self.size_bytes)
 
 
+def scan_item_key(item: ScanItem) -> str:
+    return "\0".join(
+        [
+            str(item.path),
+            item.category,
+            item.reason,
+            item.duplicate_group,
+            item.checksum,
+        ]
+    )
+
+
 def classify_risk(path: Path) -> tuple[str, str]:
     path_text = str(path)
     path_lower = path_text.lower()
