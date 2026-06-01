@@ -87,3 +87,36 @@ cookies*
 *password*
 headers.json
 auth.json
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Build output
+build/
+dist/
+*.spec
+
+# PyCharm
+.idea/
+*.iml
+
+# Local data
+history.json
+*.log
+
+# Env files
+.env
+.env.*
+*.env
+!.env.example
+
+# OS
+.DS_Store
+Thumbs.db
